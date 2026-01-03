@@ -3,302 +3,363 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Duckcraft — Mod Runtime </title>
+  <title>Duckcraft — Mod Loader (auto-inject uploaded mods)</title>
   <style>
-    :root{--bg:#04101a;--accent:#ffd166;--muted:#9aa6b2;--danger:#ff6b6b}
-    html,body{height:100%;margin:0;font-family:Inter,system-ui,Roboto,Arial;background:linear-gradient(180deg,#04101a,#052038);color:#e6eef6}
-    .wrap{padding:12px}
-    header{display:flex;gap:12px;align-items:center}
-    header h2{margin:0;color:var(--accent);font-size:16px}
-    .panel{margin-top:12px;padding:12px;background:rgba(255,255,255,0.02);border-radius:8px;border:1px solid rgba(255,255,255,0.02)}
-    pre{white-space:pre-wrap;margin:0;color:#dfeef6;font-size:13px}
-    .log{margin-top:8px;max-height:180px;overflow:auto;background:rgba(0,0,0,0.15);padding:8px;border-radius:6px}
-    .status{margin-top:8px;font-size:13px;color:var(--muted)}
-    .error{color:var(--danger)}
-    .controls{margin-top:10px;display:flex;gap:8px}
-    button{background:var(--accent);border:none;color:#072024;padding:6px 10px;border-radius:6px;cursor:pointer;font-weight:600}
-    canvas{display:block;margin-top:12px;background:#00121a;border-radius:6px;width:100%;height:240px}
-    .small{font-size:12px;color:var(--muted)}
+    body{font-family:Inter,system-ui,Arial;background:#071028;color:#e6eef6;margin:0;padding:18px}
+    .wrap{max-width:1100px;margin:18px auto}
+    .panel{background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;margin-top:12px}
+    .drop{border:2px dashed rgba(255,255,255,0.04);padding:14px;border-radius:8px;text-align:center;cursor:pointer}
+    button{background:#ffd166;color:#072024;border:none;padding:8px 10px;border-radius:6px;cursor:pointer}
+    button.ghost{background:transparent;border:1px solid rgba(255,209,102,0.12);color:var(--accent)}
+    pre{white-space:pre-wrap;background:rgba(0,0,0,0.12);padding:8px;border-radius:6px;max-height:260px;overflow:auto}
+    .muted{color:#9aa6b2;font-size:13px}
+    iframe{width:100%;height:520px;border:1px solid rgba(255,255,255,0.03);border-radius:8px;background:#020a10}
   </style>
 </head>
 <body>
-  <div class="wrap" role="main" aria-live="polite">
-    <header>
-      <h2 id="title">Duckcraft Mod Runtime</h2>
-    </header>
+  <div class="wrap">
+    <h1>Duckcraft — Mod Loader</h1>
+    <div class="muted">This loader watches for mods uploaded by mod.html and injects them into the runtime iframe (runtime.html). It supports:
+      - local in-browser injection from a selected .dcm (ZIP),
+      - automatic injection when mod.html posts upload info via BroadcastChannel or when server provides a baseUrl for the uploaded mod.
+    </div>
 
     <div class="panel">
-      <div><strong>Manifest</strong></div>
-      <pre id="manifest">No manifest loaded.</pre>
-
-      <div class="status" id="status">Waiting for host init...</div>
-
-      <div class="controls">
-        <button id="ping">Ping Host</button>
-        <button id="unload">Unload Mod</button>
+      <div id="dropzone" class="drop">Drop .dcm here or click to choose
+        <input id="fileInput" type="file" accept=".dcm" style="display:none" />
       </div>
 
-      <div class="log" id="log"></div>
+      <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+        <button id="injectBtn" disabled>Inject selected .dcm into runtime iframe</button>
+        <button id="clearBtn" class="ghost">Clear selection</button>
+        <div id="fileMeta" class="muted">No file selected</div>
+      </div>
 
-      <canvas id="modCanvas" width="800" height="400" aria-label="Mod rendering canvas"></canvas>
+      <div style="margin-top:12px">
+        <label class="small">Manifest preview</label>
+        <pre id="manifestPreview">No manifest preview available.</pre>
+      </div>
 
-      <div class="small" style="margin-top:8px;">
-        Notes: The parent must transfer a MessagePort when sending the init message. See debugging tips below.
+      <div style="margin-top:8px" class="muted">
+        Note: If you upload a mod through mod.html (another tab), it should broadcast upload info via BroadcastChannel('duckcraft-mods') with message:
+        <pre>{"type":"mod_uploaded","uploadId":"...","baseUrl":"https://cdn.example.com/mods/slug/","manifestUrl":"https://..."}</pre>
+        This loader listens for that and will fetch manifest (or ask server using uploadId) and inject the mod automatically into the runtime iframe.
+      </div>
+    </div>
+
+    <div class="panel">
+      <strong>Runtime iframe (runtime.html)</strong>
+      <iframe id="runtimeFrame" src="./runtime.html" title="Duckcraft runtime"></iframe>
+
+      <div style="margin-top:10px">
+        <label class="small">Runtime messages</label>
+        <pre id="runtimeLog">Waiting for runtime...</pre>
       </div>
     </div>
   </div>
 
+  <!-- JSZip for ZIP extraction in browser (used only for local file injection/preview) -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
   <script>
   (function () {
-    'use strict';
+    const fileInput = document.getElementById('fileInput');
+    const dropzone = document.getElementById('dropzone');
+    const injectBtn = document.getElementById('injectBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const fileMeta = document.getElementById('fileMeta');
+    const manifestPreview = document.getElementById('manifestPreview');
+    const runtimeLog = document.getElementById('runtimeLog');
+    const iframe = document.getElementById('runtimeFrame');
 
-    const manifestEl = document.getElementById('manifest');
-    const statusEl = document.getElementById('status');
-    const logEl = document.getElementById('log');
-    const pingBtn = document.getElementById('ping');
-    const unloadBtn = document.getElementById('unload');
-    const canvas = document.getElementById('modCanvas');
+    let selectedFile = null;
+    let manifestObj = null;
+    let assetsToSend = null; // array of {path, base64|null, mime, isEntry, contentText?}
+    let entryPath = null;
 
-    let port = null;               // MessagePort to host
-    let manifest = null;
-    let baseUrl = null;
-    let modModule = null;          // imported module
-    let pending = new Map();
-    let reqId = 1;
-
-    function now() { return new Date().toISOString().slice(11,23); }
-    function log(msg, level='info') {
-      const d = document.createElement('div');
-      d.textContent = `${now()} — ${msg}`;
-      if (level === 'error') d.style.color = 'var(--danger)';
-      logEl.appendChild(d);
-      logEl.scrollTop = logEl.scrollHeight;
-      console[level === 'error' ? 'error' : 'log']('[mod-runtime]', msg);
+    // Helper logs
+    function logRuntimeLine(line) {
+      runtimeLog.textContent += '\\n' + new Date().toISOString().slice(11,23) + ' — ' + line;
+      runtimeLog.scrollTop = runtimeLog.scrollHeight;
+      console.log('[parent]', line);
     }
-    function setStatus(s, isErr=false) {
-      statusEl.textContent = s;
-      statusEl.className = isErr ? 'error' : '';
+    function human(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+      return (bytes/1024/1024).toFixed(2) + ' MB';
     }
 
-    // handle messages that arrive on the transferred MessagePort
-    function handlePortMessage(ev) {
+    // Detect ZIP/7z
+    async function detectArchiveType(file) {
+      const buf = await file.slice(0, 8).arrayBuffer();
+      const v = new Uint8Array(buf);
+      if (v[0] === 0x50 && v[1] === 0x4B && v[2] === 0x03 && v[3] === 0x04) return 'zip';
+      if (v[0] === 0x37 && v[1] === 0x7A && v[2] === 0xBC && v[3] === 0xAF) return '7z';
+      return 'unknown';
+    }
+
+    // base64 conversion
+    function arrayBufferToBase64(buffer) {
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      const chunkSize = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        const sub = bytes.subarray(i, i + chunkSize);
+        binary += String.fromCharCode.apply(null, sub);
+      }
+      return btoa(binary);
+    }
+
+    // File selection handlers
+    dropzone.addEventListener('click', () => fileInput.click());
+    dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.opacity = '0.9'; });
+    dropzone.addEventListener('dragleave', () => { dropzone.style.opacity = '1'; });
+    dropzone.addEventListener('drop', (e) => { e.preventDefault(); dropzone.style.opacity = '1'; const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) handleFile(f); });
+    fileInput.addEventListener('change', (e) => { const f = e.target.files && e.target.files[0]; if (f) handleFile(f); });
+
+    clearBtn.addEventListener('click', () => {
+      selectedFile = null; manifestObj = null; assetsToSend = null; entryPath = null;
+      injectBtn.disabled = true;
+      fileMeta.textContent = 'No file selected';
+      manifestPreview.textContent = 'No manifest preview available.';
+    });
+
+    // Prepare selected .dcm for injection (ZIP only previewable)
+    async function handleFile(file) {
+      selectedFile = file;
+      fileMeta.textContent = `${file.name} — ${human(file.size)}`;
+      injectBtn.disabled = true;
+      manifestPreview.textContent = 'Detecting archive...';
+
+      try {
+        const arch = await detectArchiveType(file);
+        if (arch !== 'zip') {
+          manifestPreview.textContent = 'Only ZIP-inside-.dcm is previewable in-browser. You can still attempt injection via server-hosted baseUrl.';
+          return;
+        }
+
+        const zip = await JSZip.loadAsync(file);
+        // find manifest.json (case-insensitive)
+        let mf = zip.file('manifest.json');
+        if (!mf) {
+          for (const name in zip.files) {
+            if (name.toLowerCase().endsWith('manifest.json')) { mf = zip.file(name); break; }
+          }
+        }
+        if (!mf) {
+          manifestPreview.textContent = 'manifest.json not found in ZIP';
+          return;
+        }
+        const manifestText = await mf.async('string');
+        try {
+          manifestObj = JSON.parse(manifestText);
+        } catch (err) {
+          manifestPreview.textContent = 'manifest.json invalid JSON: ' + err.message;
+          return;
+        }
+
+        entryPath = (manifestObj.entry || '').replace(/^\/+/, '');
+        assetsToSend = [];
+        const allowedExt = ['js','mjs','json','png','jpg','jpeg','webp','ogg','wav','mp3'];
+        for (const name in zip.files) {
+          const zf = zip.files[name];
+          if (zf.dir) continue;
+          const norm = name.replace(/^\/+/, '');
+          const ext = (norm.split('.').pop() || '').toLowerCase();
+          if (!allowedExt.includes(ext)) continue;
+          if (norm === entryPath && (ext === 'js' || ext === 'mjs')) {
+            const text = await zf.async('string');
+            assetsToSend.push({ path: norm, base64: null, mime: 'application/javascript', isEntry: true, contentText: text });
+            continue;
+          }
+          const ab = await zf.async('arraybuffer');
+          const b64 = arrayBufferToBase64(ab);
+          let mime = 'application/octet-stream';
+          if (['png','jpg','jpeg','webp'].includes(ext)) mime = 'image/' + (ext === 'jpg' ? 'jpeg' : ext);
+          else if (['ogg','wav'].includes(ext)) mime = 'audio/ogg';
+          else if (ext === 'mp3') mime = 'audio/mpeg';
+          else if (ext === 'json') mime = 'application/json';
+          else if (ext === 'js') mime = 'application/javascript';
+          assetsToSend.push({ path: norm, base64: b64, mime, isEntry: false });
+        }
+
+        manifestPreview.textContent = JSON.stringify(manifestObj, null, 2);
+        injectBtn.disabled = false;
+        logRuntimeLine('Prepared ' + assetsToSend.length + ' assets for injection (entry: ' + entryPath + ')');
+      } catch (err) {
+        manifestPreview.textContent = 'Error processing archive: ' + err.message;
+        logRuntimeLine('Error processing file: ' + err.message);
+        injectBtn.disabled = true;
+      }
+    }
+
+    // Parent listens for runtime messages (if runtime posts status)
+    window.addEventListener('message', (ev) => {
       const data = ev.data;
       if (!data || typeof data !== 'object') return;
-
-      if (data.type === 'response' && data.id) {
-        const rec = pending.get(data.id);
-        if (rec) {
-          clearTimeout(rec.t);
-          pending.delete(data.id);
-          if (data.ok) rec.resolve(data.result);
-          else rec.reject(new Error(data.error || 'Host error'));
-        }
-        return;
+      if (data.type === 'runtime_ready') {
+        logRuntimeLine('runtime_ready received from iframe');
+      } else if (data.type === 'mod_loaded') {
+        logRuntimeLine('iframe reports mod_loaded: ' + (data.manifest && (data.manifest.name || data.manifest.id) || 'unknown'));
+      } else if (data.type === 'runtime_log') {
+        logRuntimeLine('iframe: ' + data.msg);
+      } else if (data.type === 'mod_error') {
+        logRuntimeLine('iframe mod_error: ' + (data.error || 'unknown'));
       }
+    });
 
-      if (data.type === 'event') {
-        // deliver to mod's onHostMessage/onMessage if present
+    // Injection flow
+    injectBtn.addEventListener('click', async () => {
+      if (selectedFile && assetsToSend && manifestObj) {
+        // Preferred: send assets or entryContent to iframe (works even if runtime is same-origin or supports install-mod)
+        const payload = {
+          type: 'install-mod',
+          manifest: manifestObj,
+          entryPath,
+          assets: assetsToSend
+        };
         try {
-          if (modModule && typeof modModule.onHostMessage === 'function') {
-            modModule.onHostMessage(data.event || {});
-          } else {
-            log('Host event: ' + JSON.stringify(data.event || {}));
-          }
-        } catch (e) {
-          log('Error delivering host event to mod: ' + e.message, 'error');
-        }
-        return;
-      }
-
-      if (data.type === 'control' && data.cmd === 'unload') {
-        unloadMod();
-        return;
-      }
-    }
-
-    function installPort(p) {
-      if (port) try { port.close(); } catch(e) {}
-      port = p;
-      port.onmessage = handlePortMessage;
-      // Some browsers need port.start()
-      try { port.start && port.start(); } catch (e) {}
-    }
-
-    // send a request to host via port, returns Promise
-    function requestHost(action, payload = {}) {
-      if (!port) return Promise.reject(new Error('No port to host'));
-      const id = 'r' + (reqId++);
-      const msg = { type: 'request', id, action, payload };
-      return new Promise((resolve, reject) => {
-        const t = setTimeout(() => { pending.delete(id); reject(new Error('Host timed out')); }, 30000);
-        pending.set(id, { resolve, reject, t });
-        try { port.postMessage(msg); } catch (err) { clearTimeout(t); pending.delete(id); reject(err); }
-      });
-    }
-
-    // Try dynamic import, fall back to fetch+blob import, and finally to using entryContent if provided by host
-    async function importModuleUrl(url, fallbackCode) {
-      // If url is a blob URL we can import directly
-      try {
-        log('Attempting dynamic import from ' + url);
-        return await import(url);
-      } catch (err) {
-        log('Direct import failed: ' + err.message);
-        // try fetch + blob
-        try {
-          const resp = await fetch(url, { credentials: 'omit', mode: 'cors' });
-          if (!resp.ok) throw new Error('Fetch failed: ' + resp.status);
-          const code = await resp.text();
-          const blob = new Blob([code], { type: 'application/javascript' });
-          const blobUrl = URL.createObjectURL(blob);
-          try {
-            log('Importing from blob URL fallback');
-            return await import(blobUrl);
-          } finally {
-            // revoke later (keep a bit for execution)
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
-          }
-        } catch (err2) {
-          log('Fetch+blob import failed: ' + err2.message);
-          // fallback to entry content provided by host (string)
-          if (fallbackCode) {
-            log('Using entryContent provided by host');
-            const blob = new Blob([fallbackCode], { type: 'application/javascript' });
-            const blobUrl = URL.createObjectURL(blob);
-            try {
-              return await import(blobUrl);
-            } finally {
-              setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
-            }
-          }
-          throw new Error('All import methods failed: ' + err.message + ' / ' + (err2 && err2.message));
-        }
-      }
-    }
-
-    async function loadAndStart(manifestObj, manifestBaseUrl, entryContent) {
-      manifest = manifestObj || {};
-      baseUrl = manifestBaseUrl || baseUrl || location.href.replace(/[^\/]*$/, '');
-      manifestEl.textContent = JSON.stringify(manifest, null, 2);
-      setStatus('Loading entry...');
-
-      if (!manifest.entry) {
-        setStatus('manifest.entry missing', true);
-        throw new Error('manifest.entry missing');
-      }
-
-      const entryUrl = new URL(manifest.entry, baseUrl).href;
-      try {
-        modModule = await importModuleUrl(entryUrl, entryContent);
-      } catch (err) {
-        log('Import error: ' + err.message, 'error');
-        setStatus('Failed to import module: ' + err.message, true);
-        // notify host about failure if possible
-        try { port && port.postMessage({ type: 'status', status: 'import_failed', error: err.message }); } catch (e) {}
-        throw err;
-      }
-
-      if (!modModule || typeof modModule.init !== 'function') {
-        setStatus('Module missing init(hostApi)', true);
-        throw new Error('Module must export init(hostApi)');
-      }
-
-      // prepare hostApi minimal surface
-      const hostApi = {
-        log: (...args) => {
-          try { requestHost('log', { args }).catch(()=>{}); } catch(e){}
-          log('[mod] ' + args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' '));
-        },
-        request: (action, payload) => requestHost(action, payload),
-        getManifest: () => manifest,
-        getBaseUrl: () => baseUrl,
-        getCanvas: () => canvas
-      };
-
-      try {
-        const maybePromise = modModule.init(hostApi);
-        if (maybePromise && typeof maybePromise.then === 'function') await maybePromise;
-        setStatus('Mod initialized');
-        log('Mod init completed');
-        try { port && port.postMessage({ type: 'status', status: 'mod_initialized' }); } catch (e) {}
-      } catch (err) {
-        setStatus('Mod init threw: ' + err.message, true);
-        log('Mod init error: ' + (err.stack || err.message), 'error');
-        throw err;
-      }
-    }
-
-    function unloadMod() {
-      try {
-        if (modModule && typeof modModule.destroy === 'function') {
-          modModule.destroy();
-        }
-      } catch (e) {
-        log('Error during mod destroy: ' + e.message, 'error');
-      }
-      modModule = null;
-      manifest = null;
-      manifestEl.textContent = 'No manifest loaded.';
-      setStatus('Unloaded');
-      log('Mod unloaded');
-    }
-
-    // parent handshake: listen for init message with transferred MessagePort.
-    window.addEventListener('message', async (ev) => {
-      try {
-        const data = ev.data;
-        if (!data || data.type !== 'init') return;
-        // prefer transferred port (ev.ports[0])
-        const receivedPort = ev.ports && ev.ports[0];
-        if (!receivedPort && data.port === 'attached') {
-          // some hosts may try to send port differently; log and continue
-          log('Init received but no MessagePort was transferred');
-        } else if (receivedPort) {
-          installPort(receivedPort);
-          log('MessagePort received from host');
-        }
-
-        // manifest and baseUrl (server should provide baseUrl where mod files are hosted)
-        const man = data.manifest || null;
-        const bUrl = data.baseUrl || data.modBaseUrl || null;
-        // optional: host can send the file contents of the entry as a string to avoid CORS issues
-        const entryContent = data.entryContent || null;
-
-        try {
-          await loadAndStart(man, bUrl, entryContent);
+          iframe.contentWindow.postMessage(payload, '*');
+          logRuntimeLine('Sent install-mod (local file) to runtime iframe');
         } catch (err) {
-          // already handled inside loadAndStart
+          alert('Failed to postMessage to iframe: ' + err.message);
+        }
+        return;
+      }
+      alert('No prepared local .dcm (select a file or wait for mod.html to broadcast upload info).');
+    });
+
+    // Automatic injection when mod.html uploads a mod:
+    //  - mod.html should broadcast to the same origin via BroadcastChannel('duckcraft-mods')
+    //  - message shape (recommended):
+    //      { type: 'mod_uploaded', uploadId: '...', baseUrl: 'https://cdn.example.com/mods/slug/', manifestUrl: 'https://cdn.../manifest.json' }
+    //
+    // Behavior here:
+    //  - If baseUrl or manifestUrl provided, fetch manifest (manifestUrl or baseUrl+'manifest.json')
+    //  - Send { type: 'install-mod', manifest, baseUrl } to iframe. The runtime must support loading the module from baseUrl + manifest.entry.
+    //  - If runtime doesn't support baseUrl mode, this loader will fall back to fetching essential assets (entry) and sending assets as base64 (like local injection).
+    //
+    // Note: this requires either same-origin hosting or CORS headers allowing fetches from this page.
+
+    let bc = null;
+    try {
+      bc = new BroadcastChannel('duckcraft-mods');
+      bc.addEventListener('message', async (ev) => {
+        const data = ev.data;
+        if (!data || data.type !== 'mod_uploaded') return;
+        logRuntimeLine('Received mod_uploaded broadcast: ' + JSON.stringify(data));
+        // prefer baseUrl (CDN location where the mod was published)
+        if (data.baseUrl || data.manifestUrl) {
+          const manifestUrl = data.manifestUrl || (data.baseUrl.replace(/\/$/, '') + '/manifest.json');
+          try {
+            logRuntimeLine('Fetching manifest from ' + manifestUrl);
+            const resp = await fetch(manifestUrl, { credentials: 'same-origin' });
+            if (!resp.ok) throw new Error('Failed to fetch manifest: ' + resp.status);
+            const manifest = await resp.json();
+            // Ask the iframe runtime to load from baseUrl
+            const payload = { type: 'install-mod', manifest, baseUrl: data.baseUrl || (new URL(manifestUrl, location.href).origin + '/') , source: 'server' };
+            try {
+              iframe.contentWindow.postMessage(payload, '*');
+              logRuntimeLine('Sent install-mod (server baseUrl) to iframe');
+            } catch (err) {
+              logRuntimeLine('postMessage to iframe failed: ' + err.message);
+              // fallback: fetch entry and smaller assets then send them as base64
+              await fallbackFetchAndSend(manifest, data.baseUrl);
+            }
+          } catch (err) {
+            logRuntimeLine('Failed to fetch manifest from baseUrl: ' + err.message);
+            // If uploadId provided, try fetching server metadata
+            if (data.uploadId) await tryFetchByUploadIdAndInject(data.uploadId);
+          }
+        } else if (data.uploadId) {
+          // if only uploadId present, call server endpoint to get metadata (server must implement)
+          await tryFetchByUploadIdAndInject(data.uploadId);
+        }
+      });
+      logRuntimeLine('Listening for upload broadcasts on BroadcastChannel "duckcraft-mods"');
+    } catch (err) {
+      logRuntimeLine('BroadcastChannel not available: ' + err.message);
+    }
+
+    // Helper: if postMessage with baseUrl failed, fallback to fetching entry & required assets and send as base64
+    async function fallbackFetchAndSend(manifest, baseUrl) {
+      try {
+        if (!baseUrl) throw new Error('No baseUrl for fallback');
+        const bUrl = baseUrl.replace(/\/$/, '') + '/';
+        const entryUrl = new URL(manifest.entry, bUrl).href;
+        logRuntimeLine('Fallback fetching entry from ' + entryUrl);
+        const resp = await fetch(entryUrl, { credentials: 'same-origin' });
+        if (!resp.ok) throw new Error('Failed to fetch entry: ' + resp.status);
+        const entryText = await resp.text();
+        // send minimal payload: manifest + entryContent (so iframe can blob-import)
+        const payload = { type: 'install-mod', manifest, baseUrl, entryContent: entryText, source: 'server-fallback' };
+        iframe.contentWindow.postMessage(payload, '*');
+        logRuntimeLine('Sent install-mod with entryContent fallback');
+      } catch (err) {
+        logRuntimeLine('Fallback fetch/send failed: ' + err.message);
+      }
+    }
+
+    // Helper: query server by uploadId for metadata. Expects server route GET /api/mods/upload/{uploadId}
+    async function tryFetchByUploadIdAndInject(uploadId) {
+      try {
+        logRuntimeLine('Querying server for uploadId ' + uploadId);
+        const resp = await fetch('/api/mods/upload/' + encodeURIComponent(uploadId), { credentials: 'same-origin' });
+        if (!resp.ok) throw new Error('Server responded ' + resp.status);
+        const json = await resp.json();
+        // expected: { baseUrl, manifestUrl } or { baseUrl, manifest }
+        if (json.manifest) {
+          // send manifest + baseUrl or fallback
+          const payload = { type: 'install-mod', manifest: json.manifest, baseUrl: json.baseUrl || null, source: 'server' };
+          iframe.contentWindow.postMessage(payload, '*');
+          logRuntimeLine('Sent install-mod using server-provided manifest');
+        } else if (json.manifestUrl || json.baseUrl) {
+          const manifestUrl = json.manifestUrl || (json.baseUrl.replace(/\/$/, '') + '/manifest.json');
+          const mresp = await fetch(manifestUrl, { credentials: 'same-origin' });
+          if (!mresp.ok) throw new Error('Failed to fetch manifest from ' + manifestUrl);
+          const manifest = await mresp.json();
+          iframe.contentWindow.postMessage({ type: 'install-mod', manifest, baseUrl: json.baseUrl || null, source: 'server' }, '*');
+          logRuntimeLine('Sent install-mod after fetching manifest via uploadId');
+        } else {
+          throw new Error('Server did not return manifest/baseUrl for uploadId');
         }
       } catch (err) {
-        log('Error handling init message: ' + err.message, 'error');
-        setStatus('Init handling error: ' + err.message, true);
+        logRuntimeLine('Failed to fetch by uploadId: ' + err.message);
       }
+    }
+
+    // initial handshake ping to iframe when it loads
+    iframe.addEventListener('load', () => {
+      try { iframe.contentWindow.postMessage({ type: 'host_ping' }, '*'); logRuntimeLine('Pinged runtime iframe'); } catch (e) { logRuntimeLine('Could not ping iframe: ' + e.message); }
     });
 
-    // UI buttons
-    pingBtn.addEventListener('click', async () => {
-      setStatus('Pinging host...');
-      try {
-        const res = await requestHost('ping', { ts: Date.now() });
-        setStatus('Host replied: ' + JSON.stringify(res));
-      } catch (err) {
-        setStatus('Ping failed: ' + err.message, true);
+    // Expose debug hook to allow mod.html (uploader) to call parent directly if same-origin:
+    window.__duckcraftLoader = {
+      injectFromServerInfo: async (info) => {
+        // info: { baseUrl?, manifestUrl?, manifest? }
+        if (!info) throw new Error('no info');
+        if (info.manifest && info.baseUrl) {
+          iframe.contentWindow.postMessage({ type: 'install-mod', manifest: info.manifest, baseUrl: info.baseUrl, source: 'manual' }, '*');
+          logRuntimeLine('Manual injection request sent');
+        } else if (info.manifestUrl || info.baseUrl) {
+          try {
+            const manifestUrl = info.manifestUrl || (info.baseUrl.replace(/\/$/, '') + '/manifest.json');
+            const resp = await fetch(manifestUrl, { credentials: 'same-origin' });
+            const manifest = await resp.json();
+            iframe.contentWindow.postMessage({ type: 'install-mod', manifest, baseUrl: info.baseUrl || null, source: 'manual' }, '*');
+            logRuntimeLine('Manual injection completed (fetched manifest)');
+          } catch (err) {
+            logRuntimeLine('Manual injection failed: ' + err.message);
+          }
+        }
       }
-    });
-
-    unloadBtn.addEventListener('click', () => {
-      try { port && port.postMessage({ type: 'control', cmd: 'unload_request' }); } catch (e){}
-      unloadMod();
-    });
-
-    // helpful default log
-    log('Runtime ready. Waiting for parent init message with transferred MessagePort.');
-    setStatus('Waiting for init');
-
-    // expose debug helpers for dev console
-    window.__modRuntime = {
-      requestHost, installPort, loadAndStart, unloadMod
     };
+
+    // If BroadcastChannel is not available or you prefer mod.html to talk to the parent directly,
+    // mod.html can do: window.open('', '<parent-window-name>').postMessage({...}, '*')
+    // or, if mod.html and this loader share the same origin, mod.html can call:
+    //   localStorage.setItem('duckcraft_last_upload', JSON.stringify({uploadId, baseUrl, manifestUrl}));
+    // and this loader can listen to 'storage' events to pick it up. (Implementing both would be trivial if you want.)
   })();
   </script>
 </body>
