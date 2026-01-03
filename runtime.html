@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>duckcraft v1.0.0 underdev</title>
+<style>
+  body { margin:0; overflow:hidden; background:black }
+  canvas { display:block; image-rendering: pixelated }
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<script>
+/* =====================
+   Render scale (PERFORMANCE)
+   0.5 = 2x faster
+   0.33 = 3x faster
+===================== */
+const SCALE = 0.5;
+
+/* =====================
+   Canvas
+===================== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+function resize() {
+  canvas.width = innerWidth * SCALE;
+  canvas.height = innerHeight * SCALE;
+  canvas.style.width = innerWidth + "px";
+  canvas.style.height = innerHeight + "px";
+}
+addEventListener("resize", resize);
+resize();
+
+/* =====================
+   Player
+===================== */
+const player = {
+  x: 32,
+  y: 32,
+  angle: 0,
+  fov: Math.PI / 3,
+  height: 1
+};
+
+/* =====================
+   World
+===================== */
+const MAP_W = 128;
+const MAP_H = 128;
+
+const map = Array.from({ length: MAP_H }, () =>
+  Array.from({ length: MAP_W }, () =>
+    Math.random() < 0.9 ? 1 : 0
+  )
+);
+
+/* =====================
+   Duck sprite
+===================== */
+const duck = [
+  "................",
+  ".....YYYY.......",
+  "...YYYYYYYY.....",
+  "..YYYYYYYYYY....",
+  ".YYYYYYYYYYYY...",
+  ".YYYYYY0000YY...",
+  ".YYYYY000000Y...",
+  ".YYYYY000000Y...",
+  ".YYYYYY0000YY...",
+  "..YYYYYYYYYY....",
+  "...YYYYYYYY.....",
+  ".....YYYY.......",
+  "......YY........",
+  "......YY........",
+  "................",
+  "................"
+];
+
+function drawDuck(size) {
+  const px = size / 16;
+  const sx = canvas.width / 2 - size / 2;
+  const sy = canvas.height / 2 - size / 2;
+
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const c = duck[y][x];
+      if (c === "Y") ctx.fillStyle = "#FFD700";
+      else if (c === "0") ctx.fillStyle = "#000";
+      else continue;
+      ctx.fillRect(sx + x * px, sy + y * px, px, px);
+    }
+  }
+}
+
+/* =====================
+   Fast ground raycaster
+===================== */
+function raycastFloor() {
+  const w = canvas.width;
+  const h = canvas.height;
+  const horizon = h / 2;
+
+  const cosA = Math.cos(player.angle);
+  const sinA = Math.sin(player.angle);
+
+  for (let x = 0; x < w; x++) {
+    const rayAngle =
+      player.angle - player.fov / 2 + (x / w) * player.fov;
+
+    const dx = Math.cos(rayAngle);
+    const dy = Math.sin(rayAngle);
+
+    // distance grows downward
+    for (let y = horizon; y < h; y++) {
+      const p = (y - horizon) / h;
+      const dist = player.height / p;
+
+      const wx = player.x + dx * dist;
+      const wy = player.y + dy * dist;
+
+      const mx = wx | 0;
+      const my = wy | 0;
+
+      ctx.fillStyle =
+        map[my]?.[mx] === 1 ? "#00aa00" : "#000";
+
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+}
+
+/* =====================
+   Input
+===================== */
+const keys = {};
+addEventListener("keydown", e => keys[e.key] = true);
+addEventListener("keyup", e => keys[e.key] = false);
+
+canvas.addEventListener("contextmenu", e => e.preventDefault());
+canvas.addEventListener("mousedown", e => {
+  const tx = (player.x + Math.cos(player.angle)) | 0;
+  const ty = (player.y + Math.sin(player.angle)) | 0;
+  if (!map[ty]) return;
+  map[ty][tx] = e.button === 0 ? 0 : 1;
+});
+
+/* =====================
+   Update
+===================== */
+function update() {
+  const speed = 0.1;
+  if (keys.a) player.angle -= 0.04;
+  if (keys.d) player.angle += 0.04;
+  if (keys.w) {
+    player.x += Math.cos(player.angle) * speed;
+    player.y += Math.sin(player.angle) * speed;
+  }
+  if (keys.s) {
+    player.x -= Math.cos(player.angle) * speed;
+    player.y -= Math.sin(player.angle) * speed;
+  }
+}
+
+/* =====================
+   Loop
+===================== */
+function loop() {
+  ctx.fillStyle = "#87CEEB";
+  ctx.fillRect(0, 0, canvas.width, canvas.height / 2);
+
+  raycastFloor();
+  drawDuck(48 * SCALE);
+
+  update();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+
+</body>
+</html>
+
