@@ -1,0 +1,17 @@
+{
+  "appInfo": {
+    "name": "duckcraft",
+    "version": "1.0.1",
+    "developer": "homemovie corp.",
+    "releaseDate": "2026-01-01",
+    "description": "duckcraft is a 3d game"
+  },
+  "settings": {
+    "theme": "dark",
+    "notifications": false,
+    "language": "en",
+    "autoUpdate": false
+  { 
+    
+  }
+ 
