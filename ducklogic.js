@@ -88,5 +88,5 @@ try {
 }
 // end of function
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------
-console.log ("operation results in bianary: ", dcb);
+console.info ("ducklogic load completed sucsessfully")
 
